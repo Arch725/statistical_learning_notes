@@ -703,12 +703,7 @@ $$
 \max (y_i(\omega^{*} · x + b^{*}) - 1, 0) & \alpha_i = C(\xi_i \ge 0, y_i(\omega^{*} · x + b^{*}) \le 1) \\
 \end{cases}
 $$
-第二个需要更改的$\alpha_2$是除$\alpha_1$外，每次更新时变化最大的$\alpha_i$：
-$$
-\alpha_2 = \mathop{\arg \max} \limits_{\alpha_i} \quad |a_{i}^{new} - a_{i}^{old}|
-$$
-所以实际的逻辑是：我们比较除$\alpha_1$外的任一$\alpha_i$，都计算$a_{i}^{new}$，然后选择$|a_{i}^{new} - a_{i}^{old}|$最大的$\alpha_i$作为真实更新的参数。
-
+第二个需要更改的$\alpha_2$我们将在本节的最后给出选取规则。我们这里假设我们已经选好了合适的$\alpha_2$。
 #### 两个参数的凸二次规划问题的解析解
 
 接下来，我们求解在固定$\alpha_i(i \ge 3)$的条件下，如何更新$\alpha_1$和$\alpha_2$：
@@ -743,11 +738,7 @@ s.t. \quad& 0 \le \alpha_2 \le C \\
 \quad& 0 \le \gamma - s \alpha_2 \le C
 \end{aligned}
 $$
-发现$W(\alpha_2)$是一个二次函数，考虑$s^2 = y_1^{2}y_2^{2}=1$，$W(\alpha_2)$的二次项$\frac{1}{2}(K_{11}-2K_{12}+K_{22})$，显然：
-$$
-\left(\phi(x_1) - \phi(x_2)\right)^2 \ge 0 \Rightarrow \phi(x_1) · \phi(x_1) + \phi(x_2) · \phi(x_2) \ge 2\phi(x_1) · \phi(x_2)
-$$
-于是$W(\alpha_2)$是开口向上的二次函数，$\mathop{\arg \min} \limits_{\alpha_2} \quad W(\alpha_2)$就是$\frac{\partial W(\alpha_2)}{\partial \alpha_2} = 0$的解。令$\frac{\partial W(\alpha_2)}{\partial \alpha_2} = 0$，即
+考虑$s^2 = y_1^{2}y_2^{2}=1$，化简得$W(\alpha_2)$的二次项$\frac{1}{2}(K_{11}-2K_{12}+K_{22})$，当$\frac{1}{2}(K_{11}-2K_{12}+K_{22}) > 0$时，$W(\alpha_2)$是开口向上的二次函数，$\mathop{\arg \min} \limits_{\alpha_2} \quad W(\alpha_2)$就是$\frac{\partial W(\alpha_2)}{\partial \alpha_2} = 0$的解。令$\frac{\partial W(\alpha_2)}{\partial \alpha_2} = 0$，即
 $$
 \frac{\partial W(\alpha_2)}{\partial \alpha_2} = (K_{11}-2K_{12}+K_{22}) \alpha_2 - [\gamma s (K_{11} - K_{12}) + y_2(v_1 - v_2) + 1 - s] = 0
 $$
@@ -774,6 +765,20 @@ $$
 &= \alpha_2^{old} + y_2 \frac{(f(x_1) - y_1) - (f(x_2) - y_2)}{K_{11}-2K_{12}+K_{22}}
 \end{aligned}
 $$
+
+以上是当$\frac{1}{2}(K_{11}-2K_{12}+K_{22}) > 0$时的情况。$\frac{1}{2}(K_{11}-2K_{12}+K_{22}) = 0$时，$W(\alpha_2)$是一次函数，由上式知，其斜率为$- [\gamma s (K_{11} - K_{12}) + y_2(v_1 - v_2) + 1 - s] \equiv -y_2 [(f(x_1) - y_1) - (f(x_2) - y_2)]$。此时$\mathop{\arg \min} \limits_{\alpha_2} \quad W(\alpha_2)$在$\alpha_2=\pm \infty$处取得（当斜率也为$0$时，$\mathop{\arg \min} \limits_{\alpha_2} \quad W(\alpha_2)$为任意值）：
+$$
+\alpha_2^{new} = \begin{cases}
+-\infty & -y_2 [(f(x_1) - y_1) - (f(x_2) - y_2)] < 0\\
+\forall \alpha_2 \in \mathbb{R} & -y_2 [(f(x_1) - y_1) - (f(x_2) - y_2)] = 0 \\
+\infty & -y_2 [(f(x_1) - y_1) - (f(x_2) - y_2)] > 0
+\end{cases}
+$$
+由于
+$$
+\left(\phi(x_1) - \phi(x_2)\right)^2 \ge 0 \Rightarrow \phi(x_1) · \phi(x_1) + \phi(x_2) · \phi(x_2) \ge 2\phi(x_1) · \phi(x_2) \Rightarrow K_{11}-2K_{12}+K_{22} \ge 0
+$$
+所以不会出现$\frac{1}{2}(K_{11}-2K_{12}+K_{22}) < 0$的情况。
 
 #### 解的剪辑
 
@@ -828,11 +833,15 @@ $$
 $$
 于是我们完成了原问题的求解。
 
-回到$\alpha_2$的选择上。考虑$|y_i|=1$，我们只需要挑选
+最后，如何选择$\alpha_2$呢？我们选择除$\alpha_1$外，每次更新时使对偶优化目标改善最大的$\alpha_i$：
 $$
-\alpha_2 = \mathop{\arg \max} \limits_{\alpha_i} \quad \left|\frac{(f(x_1) - y_1) - (f(x_i) - y_i)}{K_{11}-2K_{i2}+K_{ii}} \right|
+\alpha_2 = \mathop{\arg \min} \limits_{\alpha_i} \quad W(\alpha_1, \alpha_{i \ne 1}^{old}) - W(\alpha_1, \alpha_{i \ne 1}^{new})
 $$
-即可。
+将$W(\alpha_1, \alpha_2)$的表达式代入，可以化简得到：
+$$
+W(\alpha_1, \alpha_{i \ne 1}^{old}) - W(\alpha_1, \alpha_{i \ne 1}^{new}) = y_i [(f(x_1) - y_1) - (f(x_i) - y_i)]\delta \alpha_i - \frac{1}{2}(K_{11}-2K_{1i}+K_{ii})(2 \alpha_i \delta \alpha_i + \delta \alpha_i^2)
+$$
+其中$\delta \alpha_i = \alpha_i^{new}- \alpha_i^{old}$。所以在代码实现时，实际上我们是先计算好每个$\alpha_{i \ne 1}$的变化$\delta \alpha_i$，再代入计算$W(\alpha_1, \alpha_{i \ne 1}^{old}) - W(\alpha_1, \alpha_{i \ne 1}^{new})$，选择改善最大的$\alpha_i$。为了加快计算速度，可以将$y_i [(f(x_1) - y_1) - (f(x_i) - y_i)]$，$\frac{1}{2}(K_{11}-2K_{1i}+K_{ii})$等元素计算好储存，在选择$\alpha_2$时可以复用。
 
 #### 更新超曲面
 
@@ -846,6 +855,6 @@ f^{new}(x) = \sum \limits_{i=1}^{N} \alpha_i y_i K(x_i, x) + b^{new}
 $$
 然后继续迭代，直到所有$\alpha_i$都满足$\text{KKT}$条件。因为问题是凸且强对偶的，所以满足$\text{KKT}$条件的解也一定是最优解。
 
-#### 一个遗留问题
+#### 代码实现建议
 
-如果所有$\alpha^{*}_i$都等于$C$，则$b^{*}$该如何求解？
+在具体实现时，初始化$\alpha=0$，$b$为任意随机数即可，因为$\xi$会隐性地协助我们满足约束条件，而不用显式定义。
