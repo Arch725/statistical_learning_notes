@@ -1,5 +1,6 @@
 import functools
 import inspect
+import itertools
 
 import numpy as np
 
@@ -33,13 +34,7 @@ class _TwoClassesSVC:
         '''
 
         if mode == 'index':
-            
-            ## if has gram_matrix, use it
-            ## if not, calculate it directly
-            if self.gram_matrix:
-                return self.gram_matrix[i, j]
-            else:
-                return self.kernel(self.X[i, :], self.X[j, :])
+            return self.gram_matrix[i, j]
         else:
             return self.kernel(self.X[i, :], j)
 
@@ -53,60 +48,27 @@ class _TwoClassesSVC:
         kernel_value = cal_kernel_value(self.index)
         return np.sum(self.alpha * self.y * kernel_value) + self.b
 
-    def get_random_generator(self):
-        return np.random.RandomState(self.random_state)
-
     def set_gram_matrix(self):
-        '''build gram matrix if dims of X is more than the length of X'''
+        '''Build the gram matrix to save time'''
 
-        if self.n <= self.N:
-            return
-        gram_matrix = np.empty(self.N, self.N)
+        self.gram_matrix = np.empty((self.N, self.N))
         for i, j in itertools.product(range(self.N), range(self.N)):
             if i <= j:
-                gram_matrix[i, j] = self.kernel(self.X[i, :], self.X[j, :])
-                gram_matrix[j, i] = gram_matrix[i, j]
-        return gram_matrix
+                self.gram_matrix[i, j] = self.kernel(self.X[i, :], self.X[j, :])
+                self.gram_matrix[j, i] = self.gram_matrix[i, j]
 
     ## procedures
-    def SMO(self):
-        '''calculate the best alpha by SMO method'''
-
-        max_gap_on_KKT = float('int')
-        iter_times = 0
-        while iter_times < self.max_iter:
-            
-            ## choose two alpha_i and update
-            first_alpha_index, max_gap_on_KKT = self.find_first_alpha()
-            if max_gap_on_KKT < self.tol:
-                break
-            second_alpha_index, max_change_on_second_alpha = self.find_second_alpha()
-            self.alpha[second_alpha_index] += max_change_on_second_alpha
-            self.alpha[first_alpha_index] -= (self.y[first_alpha_index] 
-                * self.y[second_alpha_index] 
-                * max_change_on_second_alpha
-            )
-            
-            ## update self.b
-            possible_bs = []
-            for j in self.index:
-                if self.alpha[j] > 0 and self.alpha[j] < self.C:
-                    for i in self.index:
-                        possible_b = self.y[j] - (self.f(j) - self.b)
-                        possible_bs.append(possible_b)
-            self.b = np.array(possible_bs).mean()           
-            iter_times += 1
-
     def find_first_alpha(self):
-        '''find the first changing alpha_i in alpha'''
+        '''find the first changing alpha_i'''
         
+        @np.vectorize
         def cal_gap_on_KKT(index):
             '''input the index and calculate the gap on KKT conditions'''
 
             ## cal y_i(f(x_i))
-            loss = self.y * self.f(self.X[index, :])
+            loss = self.y[index] * self.f(index)
 
-            ## cal gap
+            ## cal the KKT gap
             if self.alpha[index] == 0:
                 return max(1 - loss, 0)
             elif self.alpha[index] == self.C:
@@ -114,83 +76,133 @@ class _TwoClassesSVC:
             else:
                 return np.abs(loss - 1)
 
-        gap_on_KKT = _cal_gap_on_KKT(self._index)
+        gap_on_KKT = cal_gap_on_KKT(self.index)
         first_alpha_index = np.argmax(gap_on_KKT)
         return first_alpha_index, gap_on_KKT[first_alpha_index]
 
     def find_second_alpha(self, first_alpha_index):
-        '''find the second changing alpha_i in alpha'''
+        '''find the second changing alpha_i and calculate its changing value in alpha'''
 
-        ## first, calculate the unclipped alpha_i
-        cal_unclipped_solution = lambda index: self.alpha[index] + self.y[index] * (
-            (self.f(first_alpha_index) - self.y[first_alpha_index, :]) -
-            (self.f(first_alpha_index) - self.y[index, :])
-        ) / (
-            self.cal_kernel(first_alpha_index, first_alpha_index) -
-            2 * self.cal_kernel(first_alpha_index, index) +
-            self.cal_kernel(index, index)
+        ## firstly, calculate the restriction of the alpha_2
+        cal_restrict = lambda index: self.y[first_alpha_index] * (
+            self.alpha[first_alpha_index] * self.y[first_alpha_index] 
+            + self.alpha[index] * self.y[index]
         )
 
-        ## second, calculate the restriction(\gamma)
-        cal_restrict = lambda index: self.y[first_alpha_index, :] * (
-            self.alpha[first_alpha_index] * self.y[first_alpha_index, :] 
-            + self.alpha[index] * self.y[index, :]
-        )
+        @np.vectorize
+        def get_solution_and_dual_problem_update(index):
 
-        ## third, calculate the lower(L) and upper(H) of the alpha_i
-        cal_L = lambda index: max(0, -cal_restrict(index))\
-        if self.alpha[first_alpha_index] * self.y[first_alpha_index, :] == -1\
-        else max(0, self.C)
+            ## secondly, calculate the lower(L) and upper(H) of the alpha_i
+            restrict = cal_restrict(index)
+            if self.y[first_alpha_index] * self.y[index] == -1:
+                L, H = max(0, -restrict), min(self.C, self.C - restrict)
+            else:
+                L, H = max(0, restrict - self.C), min(self.C, restrict)
 
-        cal_H = lambda index: min(self.C, self.C - cal_restrict(index))\
-        if self.alpha[first_alpha_index] * self.y[first_alpha_index, :] == -1\
-        else min(self.C, cal_restrict(index))
+            ## thirdly, calculate the unclipped solution of the alpha_i
+            ## if index != first_alpha_index and denominator == 0, means the cost function is a linear function
+            ## if numerator < 0, means the solution = L
+            ## if numerator > 0, means the solution = H
+            ## if numerator = 0, the solution will be unchanged
+            denominator = (
+                self.cal_kernel(first_alpha_index, first_alpha_index) -
+                2 * self.cal_kernel(first_alpha_index, index) +
+                self.cal_kernel(index, index)
+            )
+            numerator = self.y[index] * (
+                (self.f(first_alpha_index) - self.y[first_alpha_index]) -
+                (self.f(index) - self.y[index])
+            )
+            if denominator == 0:
+                if numerator < 0:
+                    unclipped_solution = float('-inf')
+                elif numerator > 0:
+                    unclipped_solution = float('inf')
+                else:
+                    unclipped_solution = self.alpha[index]
+            else:
+                unclipped_solution = self.alpha[index] + numerator / denominator
 
-        ## fourth, clip the solution
-        clip = lambda index: cal_L(index) if cal_unclipped_solution(index) < cal_L(index)\
-        else (cal_H(index) if cal_unclipped_solution(index) > cal_H(index) else cal_unclipped_solution(index))
+            ## fourthly, calculate the clipped solution
+            if unclipped_solution < L:
+                clipped_solution = L
+            elif unclipped_solution > H:
+                clipped_solution = H
+            else:
+                clipped_solution = unclipped_solution
 
-        ## finally, calculate the changing range
-        cal_changing_range = lambda index: clip(index) - self.alpha[index]
+            ## fifthly, calculate the upgrade between the clipped solution and the old solution
+            clipped_solution_upgrade = clipped_solution - self.alpha[index]
 
-        ## run the functions stack
-        changing_range = cal_changing_range(self.index)
-        abs_changing_range = np.abs(changing_range)
+            ## sixly, calculate the loss of dual problem caused by the upgrade of the clipped solution
+            dual_problem_loss = numerator * clipped_solution_upgrade - denominator * (
+                self.alpha[index] * clipped_solution_upgrade 
+                + clipped_solution_upgrade ** 2 / 2
+            )
 
-        ## second alpha index \ne first alpha index
-        ## set changing range of first alpha index for avoiding 
-        ## selecting first alpha index as second alpha index
-        ## (zero also has risk, only negative value is ok)
-        abs_changing_range[first_alpha_index] = -1
-        second_alpha_index = np.argmax(abs_changing_range)
-        return second_alpha_index, changing_range[second_alpha_index]
+            return clipped_solution_upgrade, dual_problem_loss
+
+        ## calculate the solution upgrade and the dual_problem_upgrade
+        ## let alpha_2 be the argmax of the dual_problem_upgrade
+        ## set the loss of the dual problem on first_alpha_index as -infinity, 
+        ## avoiding choosing first alpha as the second alpha
+        solution_upgrades, dual_problem_losses = get_solution_and_dual_problem_update(self.index)
+        dual_problem_losses[first_alpha_index] = float('-inf')
+        second_alpha_index = np.argmax(dual_problem_losses)
+        return second_alpha_index, solution_upgrades[second_alpha_index]
+
+    def SMO(self):
+        '''calculate the best alpha by SMO method'''
+
+        max_gap_on_KKT = float('inf')
+        iter_times = 0
+        while iter_times < self.max_iter:
+            
+            ## choose two alpha_i and update
+            first_alpha_index, max_gap_on_KKT = self.find_first_alpha()
+            second_alpha_index, solution_upgrade_on_second_alpha = self.find_second_alpha(first_alpha_index)
+            self.alpha[second_alpha_index] += solution_upgrade_on_second_alpha
+            self.alpha[first_alpha_index] -= (self.y[first_alpha_index] 
+                * self.y[second_alpha_index] 
+                * solution_upgrade_on_second_alpha
+            )
+  
+            ## update self.b, if none of alpha is support vector, b will be unchanged
+            num_possible_bs, sum_possible_bs = 0, 0
+            for j in self.index:
+                if self.alpha[j] > 0 and self.alpha[j] < self.C:
+                    num_possible_bs += 1
+                    sum_possible_bs += self.y[j] - (self.f(j) - self.b)
+            if num_possible_bs > 0:
+                self.b = sum_possible_bs / num_possible_bs
+
+            ## if the max gap of KKT less than the tolerance, exit loop
+            if max_gap_on_KKT < self.tol:
+                break
+            iter_times += 1
 
     def fit(self):
+        '''Calculate the best solution: alpha and b'''
 
         ## get size and dims of the dataset
         self.N, self.n = self.X.shape[0], self.X.shape[1]
-
-        ## init random generator
-        rng = self.get_random_generator()
 
         ## save an index array, which will be reused for many times
         self.index = np.arange(self.N)
 
         ## init alpha, the solution of the dual problem
-        self.alpha = rng.rand(self.N) * self.C
+        self.alpha = np.zeros(self.N)
 
-        ## adjust the last component of alpha to fulfill the restrict of the dual problem
-        ## do not calculate the first N-1 sum for avolding slice N-1, which will cost lots of memory
-        self.alpha[-1] = self.y[-1] * -(self.alpha * self.y - self.alpha[-1] * self.y[-1])
-
-        ## if n > N, calculate the Gram matrix of the kernel(X1, X2) to short the training time
-        ## else, `self._gram_matrix` is `None`
-        self.gram_matrix = self.set_gram_matrix()
+        ## set matrix directly instead of `self.gram_matrix = set_gram_matrix()`
+        ## in terms of saving memory
+        self.set_gram_matrix()
 
         ## init b, the bias of the hypersurface
-        self.b = rng.rand(self.N)
+        ## the value of init value of b does not matter because of the relaxing factor
+        self.b = 0
 
         ## solve by SMO method
+        ## self.alpha and self.b will be itered in each iteration
         self.SMO()
 
 
@@ -210,12 +222,12 @@ class MySVC:
         self._sub_svcs = []
         
     ## private procedures
-    def _remap_params(self):
+    def _remap_params(self, X):
 
         ## must modify gamma first: kernel function relys on gamma
-        if gamma == 'scale':
+        if self._kwargs['gamma'] == 'scale':
             self._kwargs['gamma'] = 1 / (X.shape[1] * X.var())
-        elif gamma == 'auto':
+        elif self._kwargs['gamma'] == 'auto':
             self._kwargs['gamma'] = 1 / X.shape[1]
 
         ## kernel: if user has not defined kernel function, find in `_Kernellib`
@@ -223,10 +235,10 @@ class MySVC:
         ## try to just return a packaged partial function contains only x1, x2 two params
         ## use `inspect.signature` to get possible params
         ## use `functools.partial` to get partial function
-        if not callable(kernel):
+        if not callable(self._kwargs['kernel']):
 
             ## get kernel function from `_Kernellib` first
-            kernel_func = _KernelLib.get_kernel(kernel)
+            kernel_func = _KernelLib.get_kernel(self._kwargs['kernel'])
 
             ## get params and their values from the signature of the kernel function
             kernel_func_params = inspect.signature(kernel_func).parameters
@@ -240,7 +252,7 @@ class MySVC:
             self._kwargs['kernel'] = functools.partial(kernel_func, **params)
 
         ## max_iter: if `max_iter` = -1, means infinity
-        if max_iter == -1:
+        if self._kwargs['max_iter'] == -1:
             self._kwargs['max_iter'] = float('inf')
         
     def _label_encode(self, X, y):
@@ -250,25 +262,16 @@ class MySVC:
         '''
         
         labels = np.unique(y)
-        total_indexs = {label: [] for label in labels}
-        for index in range(len(X)):
-            total_indexs[y[index]].append(index)
-            
-        ## separate k classes
-        for label, indexs in total_indexs.items():
-            encoded_y = y.copy()
-            other_indexs = []
-            for other_label, other_index in total_indexs.items():
-                if other_label != label:
-                    other_indexs += other_index
-            encoded_y[indexs] = 1
-            encoded_y[other_indexs] = -1
-            yield encoded_y, label
+
+        ## for K classes, use K-1 sub classifiers is ok
+        for label in labels[:-1]:
+            yield np.where(y == label, 1, -1), label
                 
     def fit(self, X, y):
+        '''Choose the One-VS-Rest(OVR) strategy, use K sub SVC to get proper result'''
         
         ## remap some params: calculate gamma, load right kernel and max_iter
-        self._remap_params()
+        self._remap_params(X)
         
         ## train every single sub SVC
         for encoded_y, label in self._label_encode(X, y):
@@ -286,7 +289,7 @@ class _KernelLib:
     '''
 
     def check_params_wrapper(func):
-        '''a decorator to check value restrictions of params
+        '''A decorator to check value restrictions of params
         check value restrictions only, 
         leave every kernel function it self to check type restrictions,
         which can mostly using the exceptions codes of the origin libs
@@ -312,26 +315,26 @@ class _KernelLib:
         return wrapped
 
     def get_kernel(kernel_name):
-        '''get the needed kernel function
+        '''Get the needed kernel function, the keyword is the name of kernel function
         if not in the lib, use the exception codes in `getattr`
         '''
 
         return getattr(_KernelLib, kernel_name)
 
     def linear(x1, x2):
-        '''linear kernel'''
+        '''Linear kernel'''
 
         return x1 @ x2
 
     @check_params_wrapper
     def poly(x1, x2, gamma=1.0, coef0=0.0, degree=1.0):
-        '''poly kernel'''
+        '''Poly kernel'''
 
         return np.power(gamma * linear(x1, x2) + coef0, degree)
 
     @check_params_wrapper
     def rbf(x1, x2, gamma=0.0):
-        '''gaussian kernel'''
+        '''Gaussian kernel'''
 
         dis = np.sum(np.power(x1 - x2, 2))
         return np.exp(- gamma * dis)
