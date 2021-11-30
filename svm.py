@@ -1,6 +1,7 @@
 import functools
 import inspect
 import itertools
+import warnings
 
 import numpy as np
 
@@ -8,7 +9,7 @@ import numpy as np
 class _TwoClassesSVC:
     '''A sub SVC classifier for two classes'''
 
-    def __init__(self, X, y, label, C, kernel, tol, max_iter, random_state, **kwargs):
+    def __init__(self, X, y, label, gram_matrix, C, kernel, tol, max_iter, **kwargs):
         '''
         args:
             X: X
@@ -44,20 +45,10 @@ class _TwoClassesSVC:
         mode = 'data'(in predicting): `index` is the data itself
         '''
 
-        cal_kernel_value = lambda k: self.cal_kernel(i=k, j=index, mode=mode)
+        cal_kernel_value = np.vectorize(lambda k: self.cal_kernel(i=k, j=index, mode=mode))
         kernel_value = cal_kernel_value(self.index)
         return np.sum(self.alpha * self.y * kernel_value) + self.b
 
-    def set_gram_matrix(self):
-        '''Build the gram matrix to save time'''
-
-        self.gram_matrix = np.empty((self.N, self.N))
-        for i, j in itertools.product(range(self.N), range(self.N)):
-            if i <= j:
-                self.gram_matrix[i, j] = self.kernel(self.X[i, :], self.X[j, :])
-                self.gram_matrix[j, i] = self.gram_matrix[i, j]
-
-    ## procedures
     def find_first_alpha(self):
         '''find the first changing alpha_i'''
         
@@ -193,10 +184,6 @@ class _TwoClassesSVC:
         ## init alpha, the solution of the dual problem
         self.alpha = np.zeros(self.N)
 
-        ## set matrix directly instead of `self.gram_matrix = set_gram_matrix()`
-        ## in terms of saving memory
-        self.set_gram_matrix()
-
         ## init b, the bias of the hypersurface
         ## the value of init value of b does not matter because of the relaxing factor
         self.b = 0
@@ -205,11 +192,19 @@ class _TwoClassesSVC:
         ## self.alpha and self.b will be itered in each iteration
         self.SMO()
 
+    def single_predict(self, x):
+        if np.sign(self.f(x, mode='data')) == 1.0:
+            return self.label
+        return np.nan
+
+    def predict(self, X):
+        return np.apply_along_axis(self.single_predict, axis=1, arr=X).astype(np.float)
+
 
 class MySVC:
     ''''''
     
-    def __init__(self, C=1.0, kernel='rbf', degree=3, gamma='scale', coef0=0.0, tol=1e-3, max_iter=-1, random_state=None):
+    def __init__(self, C=1.0, kernel='rbf', degree=3, gamma='scale', coef0=0.0, tol=1e-3, max_iter=-1):
         '''
         args:
             kernel: some special string or a user-defined callable.
@@ -218,10 +213,13 @@ class MySVC:
         '''
         
         ## save all params for passing to several two classed SVCs later
-        self._kwargs = {attr: val for attr, val in locals().items() if attr != 'self'}
-        self._sub_svcs = []
+        ## `_bye` means the bye label, because for K classes we only need K-1 sub classifiers
+        self._params = {attr: val for attr, val in locals().items() if attr != 'self'}
+        self._kwargs = self.params.copy()
+        self._sub_svcs = {}
+        self._bye = None
         
-    ## private procedures
+    ## private methods
     def _remap_params(self, X):
 
         ## must modify gamma first: kernel function relys on gamma
@@ -254,6 +252,18 @@ class MySVC:
         ## max_iter: if `max_iter` = -1, means infinity
         if self._kwargs['max_iter'] == -1:
             self._kwargs['max_iter'] = float('inf')
+
+    def _get_gram_matrix(self, X):
+        '''Build the gram matrix to save time'''
+
+        N = len(X)
+        kernel = self._kwargs['kernel']
+        gram_matrix = np.empty((N, N))
+        for i, j in itertools.product(range(N), range(N)):
+            if i <= j:
+                gram_matrix[i, j] = kernel(X[i, :], X[j, :])
+                gram_matrix[j, i] = gram_matrix[i, j]
+        return gram_matrix
         
     def _label_encode(self, X, y):
         '''Seperate data with K classes into K combinations, 
@@ -262,22 +272,116 @@ class MySVC:
         '''
         
         labels = np.unique(y)
+        np.random.shuffle(labels)
+        self._bye = labels[-1]
 
         ## for K classes, use K-1 sub classifiers is ok
         for label in labels[:-1]:
-            yield np.where(y == label, 1, -1), label
-                
+            yield np.where(y == label, 1, -1), float(label)
+
+    ## public attributes
+    @property
+    def is_fitted(self) -> int:
+        '''Judge the model is fitted or not'''
+
+        if len(self._sub_svcs) > 0:
+            return True
+        warnings.warn('The model is not fitted.')
+        return False
+
+    @property
+    def n_sub_classifiers(self) -> int:
+        '''Get the number of sub classifiers'''
+
+        return len(self._sub_svcs)
+
+    @property
+    def bye(self):
+        '''Get the bye label of the labels'''
+
+        return self._bye
+
+    @property
+    def dual_coef(self) -> dict:
+        '''Get dual coeffients(alphas)
+        return:
+            dual_coef: dict, each key is the label of the sub svc, value is the alpha
+        '''
+        if not self.is_fitted:
+            return {}
+        return {label: sub_svc.alpha for label, sub_svc in self._sub_svcs.items()}
+
+    @property
+    def coef(self) -> dict:
+        '''Get coeffients if the kernel is linear
+        return:
+            coef: dict, each key is the label of the sub svc, value is the omega
+        '''
+        
+        if not self.is_fitted:
+            return {}
+        elif self._kwargs.get('kernel', None) != 'linear':
+            raise ValueError('Only linear SVC has explicit coef!')
+        return {
+            label: np.sum(sub_svc.alpha * sub_svc.y * sub_svc.X, axis=0) 
+            for label, sub_svc in self._sub_svcs.items()
+        }
+
+    @property
+    def intercept(self) -> dict:
+        '''Get dual coeffients(alphas)
+        return:
+            dual_coef: dict, each key is the label of the sub svc, value is the alpha
+        '''
+
+        if not self.is_fitted:
+            return {}
+        return {label: sub_svc.b for label, sub_svc in self._sub_svcs.items()}   
+    
+    @property
+    def params(self) -> dict:
+        return self._params 
+      
+    ## public methods        
     def fit(self, X, y):
         '''Choose the One-VS-Rest(OVR) strategy, use K sub SVC to get proper result'''
         
         ## remap some params: calculate gamma, load right kernel and max_iter
         self._remap_params(X)
+
+        ## calculate the gram matrix
+        gram_matrix = self._get_gram_matrix(X)
         
         ## train every single sub SVC
         for encoded_y, label in self._label_encode(X, y):
-            sub_svc = _TwoClassesSVC(X=X, y=encoded_y, label=label, **self._kwargs)
+            sub_svc = _TwoClassesSVC(X=X, y=encoded_y, label=label, gram_matrix=gram_matrix, **self._kwargs)
             sub_svc.fit()
-            self._sub_svcs.append(sub_svc)
+            self._sub_svcs[label] = sub_svc
+
+    def predict(self, X) -> np.ndarray:
+        '''Prediction based on given X
+        return:
+            np.ndarray(len(X), 1)
+        '''
+
+        reduced_predicts = np.empty((len(X), self.n_sub_classifiers))
+        for index, sub_svc in enumerate(self._sub_svcs.values()):
+            reduced_predicts[:, index] = sub_svc.predict(X)
+
+        def find_most_freq(arr):
+            labels, counts = np.unique(arr[~np.isnan(arr)], return_counts=True)
+
+            ## if all preds are np.nan, means the label is the bye label
+            try:
+                most_possible_label_index = np.argmax(counts)
+                return labels[most_possible_label_index]
+            except:
+                return self.bye
+
+        return np.apply_along_axis(find_most_freq, axis=1, arr=reduced_predicts)
+
+    def accuracy(self, X, y):
+        return np.sum(y == self.predict(X)) / len(y)
 
 
 class _KernelLib:
