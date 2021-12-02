@@ -3,50 +3,31 @@ import inspect
 import itertools
 import warnings
 
+from base import _Core, _Machine
+
 import numpy as np
 
 
-class _TwoClassesSVC:
+class _TwoClassesSVC(_Core):
     '''A sub SVC classifier for two classes'''
 
-    def __init__(self, X, y, label, gram_matrix, C, kernel, tol, max_iter, **kwargs):
+    def __init__(self, upper_class, y, label):
         '''
         args:
-            X: X
+            upper_class: `MySVC`. Use upper_class to get tools
             y: encoded y. If value == `label`, then +1, else -1
-            label: the positive label in this sub SVC
-            kernel: packaged as a partial function(x1, x2)
-            others: see in `MySVC`
-        '''
+            label: the positive label in this sub SVC'''
 
-        ## load params, kwargs are params in kernel function
-        ## because the kernel function has been packaged before
-        ## these params are useless here
-        for arg_name, arg_val in locals().items():
-            if arg_name != 'self' and arg_name not in kwargs:
-                setattr(self, arg_name, arg_val)
+        super().__init__(upper_class=upper_class, y=y, label=label)
 
     ## methods
-    def cal_kernel(self, i, j, mode='index'):
-        '''calculate kernel function using index of data or data itself,
-        use gram matrix in terms of the relationship between self.n and self.N
-        mode = 'index'(default, in training): `j` is the index of data
-        mode = 'data'(in predicting): `j` is the data itself
-        '''
-
-        if mode == 'index':
-            return self.gram_matrix[i, j]
-        else:
-            return self.kernel(self.X[i, :], j)
-
     def f(self, index, mode='index'):
         '''the function to seperate the positive and negative data points
         mode = 'index'(default, in training): `index` is the index of data
-        mode = 'data'(in predicting): `index` is the data itself
-        '''
+        mode = 'data'(in predicting): `index` is the data itself'''
 
-        cal_kernel_value = np.vectorize(lambda k: self.cal_kernel(i=k, j=index, mode=mode))
-        kernel_value = cal_kernel_value(self.index)
+        cal_kernel_value = np.vectorize(lambda k: self.upper_class.cal_kernel(i=k, j=index, mode=mode))
+        kernel_value = cal_kernel_value(self.upper_class.index)
         return np.sum(self.alpha * self.y * kernel_value) + self.b
 
     def find_first_alpha(self):
@@ -62,12 +43,12 @@ class _TwoClassesSVC:
             ## cal the KKT gap
             if self.alpha[index] == 0:
                 return max(1 - loss, 0)
-            elif self.alpha[index] == self.C:
+            elif self.alpha[index] == self.upper_class.C:
                 return max(loss - 1, 0)
             else:
                 return np.abs(loss - 1)
 
-        gap_on_KKT = cal_gap_on_KKT(self.index)
+        gap_on_KKT = cal_gap_on_KKT(self.upper_class.index)
         first_alpha_index = np.argmax(gap_on_KKT)
         return first_alpha_index, gap_on_KKT[first_alpha_index]
 
@@ -86,9 +67,9 @@ class _TwoClassesSVC:
             ## secondly, calculate the lower(L) and upper(H) of the alpha_i
             restrict = cal_restrict(index)
             if self.y[first_alpha_index] * self.y[index] == -1:
-                L, H = max(0, -restrict), min(self.C, self.C - restrict)
+                L, H = max(0, -restrict), min(self.upper_class.C, self.upper_class.C - restrict)
             else:
-                L, H = max(0, restrict - self.C), min(self.C, restrict)
+                L, H = max(0, restrict - self.upper_class.C), min(self.upper_class.C, restrict)
 
             ## thirdly, calculate the unclipped solution of the alpha_i
             ## if index != first_alpha_index and denominator == 0, means the cost function is a linear function
@@ -96,9 +77,9 @@ class _TwoClassesSVC:
             ## if numerator > 0, means the solution = H
             ## if numerator = 0, the solution will be unchanged
             denominator = (
-                self.cal_kernel(first_alpha_index, first_alpha_index) -
-                2 * self.cal_kernel(first_alpha_index, index) +
-                self.cal_kernel(index, index)
+                self.upper_class.cal_kernel(first_alpha_index, first_alpha_index) -
+                2 * self.upper_class.cal_kernel(first_alpha_index, index) +
+                self.upper_class.cal_kernel(index, index)
             )
             numerator = self.y[index] * (
                 (self.f(first_alpha_index) - self.y[first_alpha_index]) -
@@ -137,7 +118,7 @@ class _TwoClassesSVC:
         ## let alpha_2 be the argmax of the dual_problem_upgrade
         ## set the loss of the dual problem on first_alpha_index as -infinity, 
         ## avoiding choosing first alpha as the second alpha
-        solution_upgrades, dual_problem_losses = get_solution_and_dual_problem_update(self.index)
+        solution_upgrades, dual_problem_losses = get_solution_and_dual_problem_update(self.upper_class.index)
         dual_problem_losses[first_alpha_index] = float('-inf')
         second_alpha_index = np.argmax(dual_problem_losses)
         return second_alpha_index, solution_upgrades[second_alpha_index]
@@ -147,7 +128,7 @@ class _TwoClassesSVC:
 
         max_gap_on_KKT = float('inf')
         iter_times = 0
-        while iter_times < self.max_iter:
+        while iter_times < self.upper_class.max_iter:
             
             ## choose two alpha_i and update
             first_alpha_index, max_gap_on_KKT = self.find_first_alpha()
@@ -160,29 +141,23 @@ class _TwoClassesSVC:
   
             ## update self.b, if none of alpha is support vector, b will be unchanged
             num_possible_bs, sum_possible_bs = 0, 0
-            for j in self.index:
-                if self.alpha[j] > 0 and self.alpha[j] < self.C:
+            for j in self.upper_class.index:
+                if self.alpha[j] > 0 and self.alpha[j] < self.upper_class.C:
                     num_possible_bs += 1
                     sum_possible_bs += self.y[j] - (self.f(j) - self.b)
             if num_possible_bs > 0:
                 self.b = sum_possible_bs / num_possible_bs
 
             ## if the max gap of KKT less than the tolerance, exit loop
-            if max_gap_on_KKT < self.tol:
+            if max_gap_on_KKT < self.upper_class.tol:
                 break
             iter_times += 1
 
     def fit(self):
         '''Calculate the best solution: alpha and b'''
 
-        ## get size and dims of the dataset
-        self.N, self.n = self.X.shape[0], self.X.shape[1]
-
-        ## save an index array, which will be reused for many times
-        self.index = np.arange(self.N)
-
         ## init alpha, the solution of the dual problem
-        self.alpha = np.zeros(self.N)
+        self.alpha = np.zeros(len(self.upper_class.X))
 
         ## init b, the bias of the hypersurface
         ## the value of init value of b does not matter because of the relaxing factor
@@ -201,7 +176,7 @@ class _TwoClassesSVC:
         return np.apply_along_axis(self.single_predict, axis=1, arr=X).astype(np.float)
 
 
-class MySVC:
+class MySVC(_Machine):
     ''''''
     
     def __init__(self, C=1.0, kernel='rbf', degree=3, gamma='scale', coef0=0.0, tol=1e-3, max_iter=-1):
@@ -214,58 +189,77 @@ class MySVC:
         
         ## save all params for passing to several two classed SVCs later
         ## `_bye` means the bye label, because for K classes we only need K-1 sub classifiers
-        self._params = {attr: val for attr, val in locals().items() if attr != 'self'}
-        self._kwargs = self.params.copy()
+        super().__init__(
+            C=C, kernel=kernel, 
+            degree=degree, gamma=gamma, coef0=coef0, tol=tol, max_iter=max_iter
+        )
         self._sub_svcs = {}
         self._bye = None
         
+    ## private methods: tools for two classes svc
+    def cal_kernel(self, i, j, mode='index'):
+        '''calculate kernel function using index of data or data itself,
+        use gram matrix in terms of the relationship between self.n and self.N
+        mode = 'index'(default, in training): `j` is the index of data
+        mode = 'data'(in predicting): `j` is the data itself
+        '''
+
+        if mode == 'index':
+            return self.gram_matrix[i, j]
+        else:
+            return self.kernel(self.X[i, :], j)
+
     ## private methods
-    def _remap_params(self, X):
+    def _remap_params(self):
+        self.C = self._params['C']
+        self.tol = self._params['tol']
 
         ## must modify gamma first: kernel function relys on gamma
-        if self._kwargs['gamma'] == 'scale':
-            self._kwargs['gamma'] = 1 / (X.shape[1] * X.var())
-        elif self._kwargs['gamma'] == 'auto':
-            self._kwargs['gamma'] = 1 / X.shape[1]
+        if self._params['gamma'] == 'scale':
+            self.gamma = 1 / (self.X.shape[1] * self.X.var())
+        elif self._params['gamma'] == 'auto':
+            self.gamma = 1 / self.X.shape[1]
 
         ## kernel: if user has not defined kernel function, find in `_Kernellib`
         ## key thinking: avoiding check the type of kernel function
         ## try to just return a packaged partial function contains only x1, x2 two params
         ## use `inspect.signature` to get possible params
         ## use `functools.partial` to get partial function
-        if not callable(self._kwargs['kernel']):
+        if not callable(self._params['kernel']):
 
             ## get kernel function from `_Kernellib` first
-            kernel_func = _KernelLib.get_kernel(self._kwargs['kernel'])
+            kernel_func = _KernelLib.get_kernel(self._params['kernel'])
 
             ## get params and their values from the signature of the kernel function
             kernel_func_params = inspect.signature(kernel_func).parameters
 
             ## build params dict
             ## the first two params is x1 and x2, ignore them
-            params = {param: self._kwargs[param] for index, param in enumerate(kernel_func_params) if index >= 2}
+            params = {param: getattr(self, param) for index, param in enumerate(kernel_func_params) if index >= 2}
 
             ## generate partial function
             ## check value restrictions of params here(check type restrictions while called)
-            self._kwargs['kernel'] = functools.partial(kernel_func, **params)
+            self.kernel = functools.partial(kernel_func, **params)
+        else:
+            self.kernel = self._params['kernel']
 
         ## max_iter: if `max_iter` = -1, means infinity
-        if self._kwargs['max_iter'] == -1:
-            self._kwargs['max_iter'] = float('inf')
+        if self._params['max_iter'] == -1:
+            self.max_iter = float('inf')
+        else:
+            self.max_iter = self._params['max_iter']
 
-    def _get_gram_matrix(self, X):
+    def _set_gram_matrix(self):
         '''Build the gram matrix to save time'''
 
-        N = len(X)
-        kernel = self._kwargs['kernel']
-        gram_matrix = np.empty((N, N))
+        N = len(self.X)
+        self.gram_matrix = np.empty((N, N))
         for i, j in itertools.product(range(N), range(N)):
             if i <= j:
-                gram_matrix[i, j] = kernel(X[i, :], X[j, :])
-                gram_matrix[j, i] = gram_matrix[i, j]
-        return gram_matrix
+                self.gram_matrix[i, j] = self.kernel(self.X[i, :], self.X[j, :])
+                self.gram_matrix[j, i] = self.gram_matrix[i, j]
         
-    def _label_encode(self, X, y):
+    def _label_encode(self, y):
         '''Seperate data with K classes into K combinations, 
         each combination has a label encoded as +1, 
         and other labels encoded as -1
@@ -320,7 +314,7 @@ class MySVC:
         
         if not self.is_fitted:
             return {}
-        elif self._kwargs.get('kernel', None) != 'linear':
+        elif self._params.get('kernel', None) != 'linear':
             raise ValueError('Only linear SVC has explicit coef!')
         return {
             label: np.sum(sub_svc.alpha * sub_svc.y * sub_svc.X, axis=0) 
@@ -346,15 +340,20 @@ class MySVC:
     def fit(self, X, y):
         '''Choose the One-VS-Rest(OVR) strategy, use K sub SVC to get proper result'''
         
+        self.X = X
+
+        ## save an index array, which will be reused for many times
+        self.index = np.arange(len(self.X))
+
         ## remap some params: calculate gamma, load right kernel and max_iter
-        self._remap_params(X)
+        self._remap_params()
 
         ## calculate the gram matrix
-        gram_matrix = self._get_gram_matrix(X)
+        self._set_gram_matrix()
         
         ## train every single sub SVC
-        for encoded_y, label in self._label_encode(X, y):
-            sub_svc = _TwoClassesSVC(X=X, y=encoded_y, label=label, gram_matrix=gram_matrix, **self._kwargs)
+        for encoded_y, label in self._label_encode(y):
+            sub_svc = _TwoClassesSVC(upper_class=self, y=encoded_y, label=label)
             sub_svc.fit()
             self._sub_svcs[label] = sub_svc
 
@@ -406,7 +405,6 @@ class _KernelLib:
             if 'gamma' in kwargs:
                 try:
                     assert kwargs['gamma'] > 0
-                    checked = True
                 except AssertionError:
                     raise ValueError('Gamma must be positive!')
                 except TypeError:
