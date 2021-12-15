@@ -9,7 +9,6 @@ class _KDTreeNode(_Core):
         super().__init__(upper_class=upper_class)
         self.left = None
         self.right = None
-        self.another_side_is_checked = False
 
         ## decide the split col index
         self.col_index = depth % self.upper_class.ncol
@@ -31,6 +30,10 @@ class _KDTreeNode(_Core):
             self.left = self.__class__(upper_class=self.upper_class, input_row_index=left_input_row_index, depth=depth+1) 
             self.right = self.__class__(upper_class=self.upper_class, input_row_index=right_input_row_index, depth=depth+1)
     
+    @property
+    def is_leaf(self):
+        return self.left is None and self.right is None
+
     def __repr__(self):
         return f'KDTreeNode(x={self.upper_class.X[self.row_index]}, y={self.label})'
 
@@ -60,7 +63,6 @@ class MyKNC(_Machine):
             return result + self.epsilon
         return result
 
-
     def _remap_params(self):
         '''Check value only, let lower codes to check type automatically'''
 
@@ -78,37 +80,42 @@ class MyKNC(_Machine):
             raise ValueError('The `p` must be positive!')
         self.p = self._params['p']
 
-    def _single_predict(self, x):
-        return getattr(self, f'_single_{self.algorithm}_predict')(x)
-
-    def _single_kd_tree_predict(self, x):
-        node_stack = [self.kd_tree]
-
-        ## find the nearest quasi-leaf node
-        ## definition of quasi-leaf node: 
-        ## 1) if x no more than tmp, tmp.left is None
-        ## 2) if x more than tmp, tmp.right is None
-        while node_stack:
-            tmp = node_stack[-1]
+    def _moving_down(self, x, tmp, node_stack):
+        '''moving down, until tmp is leaf or quasi-leaf'''
+        
+        ## push all nodes along the way into stack
+        ## P.S. definition of quasi-leaf node: 
+        ## 1) if x no more than it and its left is None
+        ## 2) if x more than it and its right is None
+        node_stack.append(tmp)
+        while True:
             if x[tmp.col_index] <= self.X[tmp.row_index, tmp.col_index]:
                 if tmp.left is not None:
                     node_stack.append(tmp.left)
+                    tmp = tmp.left
                 else:
                     break
             else:
                 if tmp.right is not None:
                     node_stack.append(tmp.right)
+                    tmp = tmp.right
                 else:
                     break
+        return node_stack
 
-        ## record the moving down path, see usage below
-        moving_down_path_nodes = node_stack[:]
+    def _single_predict(self, x):
+        return getattr(self, f'_single_{self.algorithm}_predict')(x)
 
-        ## traceback
+    def _single_kd_tree_predict(self, x):
+
+        ## initialize node stack and a PriorityQueue with distance
+        node_stack = self._moving_down(x, tmp=self.kd_tree, node_stack=[])
         dis_pqueue = queue.PriorityQueue(maxsize=self.n)
+
+        ## use reciprocal because the PriorityQueue can only pop the min value, not the max
         reciprocal_of_max_distance = float('inf')
         while node_stack:
-            tmp = node_stack[-1]
+            tmp = node_stack.pop()
 
             ## calculate the distance between tmp and x, and try to put it in the pqueue
             dis_from_node = self._dis_between_two_dots(tmp.row_index, x)
@@ -132,26 +139,16 @@ class MyKNC(_Machine):
                 dis_pqueue.put((curr_reciprocal_of_max_dis, curr_max_node))
 
             ## 2. decide the next tmp mode
-            node_stack.pop()
-            if tmp.left is not None or tmp.right is not None:
-                
-                ## if the pqueue is not full or the distance from the boundary is not further, we need to check the other side
-                if not dis_pqueue.full() or 1 / self._dis_from_boundary(tmp.row_index, tmp.col_index, x) >= reciprocal_of_max_distance:
-
-                    ## if tmp in the path of moving down, we need to put child on the other side into shack
-                    ## if not, put child on this side into stack
-                    ## of course, the child must exist
-                    if tmp in moving_down_path_nodes:
-                        if x[tmp.col_index] <= self.X[tmp.row_index, tmp.col_index] and tmp.right is not None:
-                            node_stack.append(tmp.right)
-                        elif x[tmp.col_index] > self.X[tmp.row_index, tmp.col_index] and tmp.left is not None:
-                            node_stack.append(tmp.left)                            
-                    else:
-                        tmp.another_side_is_checked = True
-                        if x[tmp.col_index] <= self.X[tmp.row_index, tmp.col_index] and tmp.left is not None:
-                            node_stack.append(tmp.left)
-                        elif x[tmp.col_index] > self.X[tmp.row_index, tmp.col_index] and tmp.right is not None:
-                            node_stack.append(tmp.right)
+            ## only the below two conditions are meeted, we need to find on the other side of tmp
+            ## 1) tmp is not leaf(leaf node is not splitted, so it does not have the method `_dis_from_boundary`)
+            ## 2) the queue is not full OR the distance from the boundary is not further than the max distance
+            if not tmp.is_leaf and (
+                not dis_pqueue.full() or 1 / self._dis_from_boundary(tmp.row_index, tmp.col_index, x) >= reciprocal_of_max_distance
+            ):
+                if x[tmp.col_index] <= self.X[tmp.row_index, tmp.col_index] and tmp.right is not None:
+                    node_stack = self._moving_down(x, tmp=tmp.right, node_stack=node_stack)
+                elif x[tmp.col_index] > self.X[tmp.row_index, tmp.col_index] and tmp.left is not None:
+                    node_stack = self._moving_down(x, tmp=tmp.left, node_stack=node_stack)
 
         ## get the most frequently label
         label_list = []
